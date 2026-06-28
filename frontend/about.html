@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ArtSim | Acerca de nosotros</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260627-sidebar-nav" />
+  <script defer src="/static/sidebar-component.js?v=20260627-sidebar-nav"></script>
+  <script defer>
+    document.addEventListener('DOMContentLoaded', function(){
+      // El componente se carga con defer; los reintentos cubren una carga anormalmente lenta.
+      const renderSidebar = () => {
+        if (window.renderSidebar) {
+          window.renderSidebar({ showSearch: false, showFilter: false, activePage: 'about' });
+          return true;
+        }
+        return false;
+      };
+
+      const setAdminState = async () => {
+        try {
+          const meRes = await fetch('/api/me');
+          if (!meRes.ok) throw new Error('Sesión no administrativa');
+          const me = await meRes.json();
+          const userNameEl = document.querySelector('.user-card__info strong');
+          const userEmailEl = document.querySelector('.user-card__info span');
+          const sidebarFooter = document.querySelector('.sidebar__footer.admin-only');
+
+          if (me && me.is_admin) {
+            document.body.classList.add('is-admin');
+            if (userNameEl) userNameEl.textContent = me.name || 'Administrador';
+            if (userEmailEl) userEmailEl.textContent = me.email || 'admin@artsim.io';
+            if (sidebarFooter) sidebarFooter.style.display = '';
+          } else {
+            document.body.classList.remove('is-admin');
+            if (sidebarFooter) sidebarFooter.style.display = 'none';
+          }
+        } catch (_e) {
+          const sidebarFooter = document.querySelector('.sidebar__footer.admin-only');
+          if (sidebarFooter) sidebarFooter.style.display = 'none';
+        }
+      };
+
+      const attachLogout = () => {
+        const logoutButton = document.querySelector('.logout');
+        if (!logoutButton) return;
+        logoutButton.addEventListener('click', async () => {
+          try { await fetch('/api/logout', { method: 'POST' }); } catch (_){ }
+          window.location.reload();
+        });
+      };
+
+      const applySidebar = async () => {
+        const rendered = renderSidebar();
+        if (rendered) {
+          await setAdminState();
+          attachLogout();
+          return true;
+        }
+        return false;
+      };
+
+      let attempts = 0;
+      const tryRender = async () => {
+        if (await applySidebar() || attempts++ > 8) return;
+        setTimeout(tryRender, 60);
+      };
+
+      tryRender();
+    });
+  </script>
+  <style>
+    /* Distingue la sección activa sin alterar el componente compartido. */
+    .nav-link--active {
+      color: #d6b5c8;
+      background: linear-gradient(180deg, rgba(183,116,154,.12), rgba(255,255,255,.02));
+      border-radius: 15px;
+      border-color: rgba(183,116,154,.14);
+    }
+  </style>
+</head>
+<body>
+  <input class="toggle" type="checkbox" id="sidebarToggle" aria-hidden="true" />
+
+  <div class="app-shell">
+    <!-- La barra lateral se inyecta desde sidebar-component.js. -->
+    <aside id="sidebarRoot" class="sidebar" aria-label="Barra lateral"></aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar__left">
+          <label for="sidebarToggle" class="icon-btn" aria-label="Abrir o cerrar barra lateral" title="Menú">
+            ☰
+          </label>
+          <div class="page-title">
+            <h1>Acerca de nosotros</h1>
+            <p>EQUIPO Y CONTACTO</p>
+          </div>
+        </div>
+
+        <a class="topbar__mini" href="/">← Volver al inicio</a>
+      </header>
+
+      <section class="content-panel">
+        <article class="page-intro">
+          <p class="kicker">EL PROYECTO</p>
+          <h2>Art Style Image Similarity</h2>
+          <p>
+            ArtSim es una herramienta de investigación enfocada en la recuperación y comparación de
+            imágenes por estilo artístico. Combina técnicas de visión por computadora con un enfoque en
+            la experiencia del usuario para explorar colecciones visuales de forma intuitiva y eficiente.
+          </p>
+        </article>
+
+        <!-- El formulario replica las restricciones del backend para dar respuesta inmediata. -->
+        <section class="suggestions">
+          <div class="suggestions__head">
+            <div>
+              <p class="kicker">FORMULARIO DE SUGERENCIAS</p>
+              <h3>Escríbenos</h3>
+              <p>Tus sugerencias ayudan a mejorar ArtSim.</p>
+            </div>
+          </div>
+
+          <form id="contactForm" novalidate>
+            <div class="form-grid">
+              <div class="field">
+                <label for="name">Nombre</label>
+                <input class="control" id="name" name="name" type="text" placeholder="Tu nombre" maxlength="100" />
+                <p class="field-error" id="nameError" aria-live="polite"></p>
+              </div>
+              <div class="field">
+                <label for="mail">Correo electrónico</label>
+                <input class="control" id="mail" name="mail" type="email" placeholder="tu@correo.com" maxlength="128" />
+                <p class="field-error" id="emailError" aria-live="polite"></p>
+              </div>
+              <div class="field textarea">
+                <label for="message">Mensaje</label>
+                <textarea class="control textarea" id="message" name="message" placeholder="Cuéntanos tu idea o sugerencia..." maxlength="800"></textarea>
+                <p class="field-error" id="messageError" aria-live="polite"></p>
+              </div>
+            </div>
+            <div class="form-actions">
+              <button class="btn btn-primary" id="sendButton" type="submit">Enviar mensaje</button>
+            </div>
+            <div class="form-status" id="formStatus" aria-live="polite"></div>
+          </form>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      const contactForm = document.getElementById('contactForm');
+      const nameInput = document.getElementById('name');
+      const emailInput = document.getElementById('mail');
+      const messageInput = document.getElementById('message');
+      const sendButton = document.getElementById('sendButton');
+      const formStatus = document.getElementById('formStatus');
+      const nameError = document.getElementById('nameError');
+      const emailError = document.getElementById('emailError');
+      const messageError = document.getElementById('messageError');
+
+      const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      const clearErrors = () => {
+        nameError.textContent = '';
+        emailError.textContent = '';
+        messageError.textContent = '';
+        formStatus.textContent = '';
+        formStatus.className = 'form-status';
+      };
+
+      const validate = () => {
+        let isValid = true;
+        clearErrors();
+
+        const name = nameInput.value.trim();
+        const email = emailInput.value.trim();
+        const message = messageInput.value.trim();
+
+        if (!name) {
+          nameError.textContent = 'El nombre es obligatorio.';
+          isValid = false;
+        } else if (name.length < 2) {
+          nameError.textContent = 'El nombre debe tener al menos 2 caracteres.';
+          isValid = false;
+        } else if (name.length > 100) {
+          nameError.textContent = 'El nombre no puede superar los 100 caracteres.';
+          isValid = false;
+        }
+
+        if (!email) {
+          emailError.textContent = 'El correo electrónico es obligatorio.';
+          isValid = false;
+        } else if (!emailPattern.test(email)) {
+          emailError.textContent = 'Ingresa un correo válido.';
+          isValid = false;
+        }
+
+        if (!message) {
+          messageError.textContent = 'El mensaje es obligatorio.';
+          isValid = false;
+        } else if (message.length < 10) {
+          messageError.textContent = 'El mensaje debe tener al menos 10 caracteres.';
+          isValid = false;
+        } else if (message.length > 800) {
+          messageError.textContent = 'El mensaje no puede superar los 800 caracteres.';
+          isValid = false;
+        }
+
+        return isValid;
+      };
+
+      contactForm.addEventListener('submit', async function (event) {
+        event.preventDefault();
+        if (!validate()) {
+          return;
+        }
+
+        sendButton.disabled = true;
+        sendButton.textContent = 'Enviando...';
+        formStatus.textContent = '';
+        formStatus.className = 'form-status';
+
+        try {
+          const response = await fetch('/api/contact', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sender_name: nameInput.value.trim(),
+              sender_email: emailInput.value.trim(),
+              message_body: messageInput.value.trim()
+            })
+          });
+
+          if (!response.ok) {
+            const error = await response.json().catch(() => null);
+            throw new Error(error?.detail || 'Error al enviar el mensaje. Intenta nuevamente.');
+          }
+
+          nameInput.value = '';
+          emailInput.value = '';
+          messageInput.value = '';
+          formStatus.textContent = 'Gracias por tu mensaje. Lo hemos recibido correctamente.';
+          formStatus.classList.add('form-status--success');
+        } catch (error) {
+          formStatus.textContent = error.message || 'No se pudo enviar el mensaje.';
+          formStatus.classList.add('form-status--error');
+        } finally {
+          sendButton.disabled = false;
+          sendButton.textContent = 'Enviar mensaje';
+        }
+      });
+    });
+  </script>
+</body>
+</html>

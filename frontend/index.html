@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ArtSim</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260627-sidebar-nav" />
+  <script defer src="/static/sidebar-component.js?v=20260627-sidebar-nav"></script>
+</head>
+<body>
+  <!-- Controles invisibles que permiten cambiar paneles y vistas mediante CSS. -->
+  <input class="toggle" type="checkbox" id="sidebarToggle" aria-hidden="true" />
+  <input class="toggle" type="checkbox" id="messagesToggle" aria-hidden="true" />
+  <input class="toggle" type="radio" name="view" id="viewGrid" checked aria-hidden="true" />
+  <input class="toggle" type="radio" name="view" id="viewList" aria-hidden="true" />
+
+  <div class="app-shell">
+    <!-- La navegación compartida se genera en sidebar-component.js. -->
+    <aside id="sidebarRoot" class="sidebar" aria-label="Barra lateral"></aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar__left">
+          <label for="sidebarToggle" class="icon-btn" aria-label="Abrir o cerrar barra lateral" title="Menú">
+            ☰
+          </label>
+
+          <div class="page-title">
+            <h1>Art Style Image Similarity</h1>
+            <p>HERRAMIENTA DE SIMILITUDES ESTILÍSTICAS</p>
+          </div>
+        </div>
+
+        <div class="topbar__right">
+          <div class="view-switch" role="tablist" aria-label="Vista">
+            <label for="viewGrid" class="view-switch__btn" title="Vista grid">▦</label>
+            <label for="viewList" class="view-switch__btn" title="Vista lista">☰</label>
+          </div>
+
+          <label for="messagesToggle" class="icon-btn messages-btn admin-only" aria-label="Abrir mensajes" title="Mensajes">
+            💬
+          </label>
+        </div>
+      </header>
+
+      <section class="content-panel">
+        <div class="loading-overlay hidden" id="loadingOverlay">
+          <div class="spinner"></div>
+        </div>
+        <div class="selected-preview hidden" id="selectedPreview">
+          <p class="selected-preview__label">Mostrando similaridad para:</p>
+          <div class="selected-preview__card">
+            <div class="selected-preview__thumb"><img id="selectedPreviewImage" src="" alt="Seleccionada" /></div>
+            <div class="selected-preview__info">
+              <strong id="selectedPreviewTitle">Título</strong>
+              <span id="selectedPreviewType">Tipo</span>
+            </div>
+          </div>
+          <div class="selected-preview__actions">
+            <button class="report-btn" id="downloadReportBtn" type="button">Descargar consulta</button>
+            <span class="selected-preview__status" id="reportStatus" aria-live="polite"></span>
+          </div>
+        </div>
+        <div class="gallery"></div>
+      </section>
+    </main>
+
+    <!-- La bandeja solo se habilita después de validar una sesión administrativa. -->
+    <aside class="messages-panel admin-only">
+      <div class="messages-panel__header">
+        <div>
+          <p class="sidebar-section__label">MENSAJES</p>
+          <h3>Formulario de contacto</h3>
+        </div>
+        <label for="messagesToggle" class="icon-btn" aria-label="Cerrar mensajes" title="Cerrar mensajes">✕</label>
+      </div>
+
+      <div class="messages-panel__content">
+        <div class="messages-panel__status" id="messagePanelStatus" aria-live="polite"></div>
+        <div class="messages-panel__empty" id="messagesEmpty">
+          <div class="empty-icon">✉</div>
+          <h4>No hay mensajes almacenados</h4>
+          <p>Aquí aparecerán los mensajes enviados por el formulario de contacto.</p>
+        </div>
+        <div class="message-list" id="messageList"></div>
+      </div>
+    </aside>
+  </div>
+</body>
+<script>
+// Estado mínimo compartido por el catálogo, la descarga y los reintentos.
+let selectedReportRecordId = null;
+let adminSessionActive = false;
+let galleryRequestInFlight = false;
+let pendingGalleryRetry = null;
+
+function setLoading(active){
+  const overlay = document.getElementById('loadingOverlay');
+  overlay?.classList.toggle('hidden', !active);
+}
+
+function setReportStatus(text, type='info'){
+  const status = document.getElementById('reportStatus');
+  if(!status) return;
+  status.textContent = text || '';
+  status.className = type ? `selected-preview__status selected-preview__status--${type}` : 'selected-preview__status';
+}
+
+function normalizeTypeClass(type){
+  return String(type || 'unknown').toLowerCase().replace(/[^a-z0-9_-]+/g, '_');
+}
+
+function showSelectedPreview(item){
+  const panel = document.getElementById('selectedPreview');
+  const img = document.getElementById('selectedPreviewImage');
+  const title = document.getElementById('selectedPreviewTitle');
+  const type = document.getElementById('selectedPreviewType');
+  if(!panel || !img || !title || !type) return;
+  selectedReportRecordId = item.id || null;
+  img.src = item.base64;
+  img.alt = item.title;
+  title.textContent = item.title || 'Imagen seleccionada';
+  type.textContent = item.type ? item.type.replace(/_/g, ' ') : 'desconocido';
+  setReportStatus('');
+  panel.classList.remove('hidden');
+}
+
+function hideSelectedPreview(){
+  const panel = document.getElementById('selectedPreview');
+  selectedReportRecordId = null;
+  setReportStatus('');
+  if(panel) panel.classList.add('hidden');
+}
+
+function filenameFromDisposition(header){
+  if(!header) return null;
+  const utfMatch = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if(utfMatch) return decodeURIComponent(utfMatch[1].replace(/"/g, ''));
+  const match = header.match(/filename="?([^";]+)"?/i);
+  return match ? match[1] : null;
+}
+
+function escapeHtml(value){
+  return String(value ?? '').replace(/[&<>'"]/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+  })[char]);
+}
+
+function formatReportDate(value){
+  const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return match ? `${match[3]}-${match[2]}-${match[1]}` : String(value || 'Sin fecha');
+}
+
+function formatFileSize(size){
+  const bytes = Number(size) || 0;
+  if(bytes < 1024) return `${bytes} B`;
+  if(bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function setReportHistoryStatus(text, type='info'){
+  const status = document.getElementById('reportHistoryStatus');
+  if(!status) return;
+  status.textContent = text || '';
+  status.className = `report-history__status report-history__status--${type}`;
+}
+
+function renderExportHistory(items){
+  const list = document.getElementById('reportHistoryList');
+  const count = document.getElementById('reportHistoryCount');
+  if(count) count.textContent = String(items.length);
+  if(!list) return;
+  if(!items.length){
+    list.innerHTML = '';
+    setReportHistoryStatus('No hay reportes exportados.', 'empty');
+    return;
+  }
+  setReportHistoryStatus('');
+  list.innerHTML = items.map(item => `
+    <button class="report-history__item" type="button" data-export-id="${Number(item.id_export)}" title="Descargar ${escapeHtml(item.report_name)}">
+      <span class="report-history__name">${escapeHtml(item.report_name)}</span>
+      <span class="report-history__meta">${formatReportDate(item.created_at)} · ${formatFileSize(item.size_bytes)}</span>
+      <span class="report-history__action">Descargar</span>
+    </button>
+  `).join('');
+}
+
+async function loadExportHistory(){
+  if(!adminSessionActive) return;
+  setReportHistoryStatus('Cargando historial...');
+  try{
+    const res = await fetch('/api/exported-files', { cache: 'no-store' });
+    if(!res.ok){
+      const payload = await res.json().catch(() => ({}));
+      throw new Error(payload.detail || 'No se pudo cargar el historial.');
+    }
+    renderExportHistory(await res.json());
+  }catch(err){
+    console.error(err);
+    setReportHistoryStatus(err.message || 'No se pudo cargar el historial.', 'error');
+  }
+}
+
+async function downloadExportedReport(exportId, button){
+  // El objeto URL temporal permite descargar el BLOB sin navegar fuera del catálogo.
+  button.disabled = true;
+  setReportHistoryStatus('Preparando descarga...');
+  try{
+    const res = await fetch(`/api/exported-files/${encodeURIComponent(exportId)}/download`, { cache: 'no-store' });
+    if(!res.ok){
+      const payload = await res.json().catch(() => ({}));
+      throw new Error(payload.detail || 'No se pudo descargar el reporte.');
+    }
+    const blob = await res.blob();
+    const filename = filenameFromDisposition(res.headers.get('Content-Disposition')) || 'consulta_similaridad.docx';
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+    setReportHistoryStatus('Reporte descargado.', 'success');
+  }catch(err){
+    console.error(err);
+    setReportHistoryStatus(err.message || 'No se pudo descargar el reporte.', 'error');
+  }finally{
+    button.disabled = false;
+  }
+}
+
+async function downloadSimilarityReport(){
+  const button = document.getElementById('downloadReportBtn');
+  if(!selectedReportRecordId || !button) return;
+  button.disabled = true;
+  setReportStatus('Generando documento...');
+  try{
+    const url = `/api/records/${encodeURIComponent(selectedReportRecordId)}/similar-report?limit=12`;
+    const res = await fetch(url);
+    if(!res.ok){
+      let detail = 'No se pudo generar el documento.';
+      try{
+        const payload = await res.json();
+        detail = payload.detail || detail;
+      }catch(_){ }
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    const filename = filenameFromDisposition(res.headers.get('Content-Disposition')) || 'consulta_similaridad.docx';
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+    setReportStatus('Documento descargado.', 'success');
+    if(adminSessionActive) await loadExportHistory();
+  }catch(err){
+    console.error(err);
+    setReportStatus(err.message || 'No se pudo generar el documento.', 'error');
+  }finally{
+    button.disabled = false;
+  }
+}
+
+async function renderCards(items){
+  const gallery = document.querySelector('.gallery');
+  if(!gallery) return;
+  pendingGalleryRetry = null;
+  if(!items || !items.length){
+    gallery.innerHTML = `<div class="empty-state"><strong>No hay coincidencias</strong> Prueba otro término o estilo para ver resultados.</div>`;
+    return;
+  }
+
+  gallery.innerHTML = items.map(item => {
+    const typeClass = `tag--${normalizeTypeClass(item.type)}`;
+    return `\
+      <article class="art-card">\
+        <div class="art-card__thumb">\
+          <img src="${item.base64}" alt="${item.title}" />\
+          <span class="resolution">${item.resolution}</span>\
+        </div>\
+        <div class="art-card__meta">\
+          <div class="art-card__title">\
+            <span class="dot"></span>\
+            <h2>${item.title}</h2>\
+          </div>\
+          <span class="tag ${typeClass}">${item.type || 'desconocido'}</span>\
+        </div>\
+        <div class="art-card__actions">\
+          <button class="similar-btn" data-id="${item.id}">Buscar similaridad</button>\
+        </div>\
+      </article>`;
+  }).join('');
+}
+
+async function fetchJsonArray(url){
+  // Centraliza la validación de las respuestas que deben contener arreglos JSON.
+  const res = await fetch(url, { cache: 'no-store' });
+  let payload = null;
+  try{
+    payload = await res.json();
+  }catch(_){
+    if(res.ok) throw new Error('La respuesta del servidor no es válida.');
+  }
+  if(!res.ok){
+    throw new Error(payload?.detail || 'No se pudo completar la solicitud.');
+  }
+  if(!Array.isArray(payload)){
+    throw new Error('La respuesta del servidor no es válida.');
+  }
+  return payload;
+}
+
+function renderGalleryLoadError(retryAction){
+  pendingGalleryRetry = retryAction;
+  const gallery = document.querySelector('.gallery');
+  if(!gallery) return;
+  gallery.innerHTML = `
+    <div class="empty-state" role="alert">
+      <div class="empty-state__content">
+        <strong>Error al cargar</strong>
+        <span>Intenta de nuevo o revisa tu conexión.</span>
+        <button class="retry-btn" type="button" data-gallery-retry>Reintentar</button>
+      </div>
+    </div>`;
+}
+
+function renderTypes(types){
+  const container = document.getElementById('dropdownContent');
+  if(!container) return;
+  const fragment = document.createDocumentFragment();
+  const options = [{ value: '', label: 'Todos' }, ...types.map(type => ({ value: type, label: type }))];
+  options.forEach(option => {
+    const item = document.createElement('a');
+    item.href = '#';
+    item.className = 'dropdown__item';
+    item.dataset.type = option.value;
+    item.textContent = option.label;
+    fragment.appendChild(item);
+  });
+  container.replaceChildren(fragment);
+}
+
+async function loadGallery(limit=12, type=null, search=null){
+  if(galleryRequestInFlight) return;
+  galleryRequestInFlight = true;
+  hideSelectedPreview();
+  setLoading(true);
+  try{
+    const q = new URLSearchParams();
+    q.set('limit', String(limit));
+    if(type) q.set('type', type);
+    if(search) q.set('search', search);
+    const items = await fetchJsonArray('/api/records?'+q.toString());
+    await renderCards(items);
+  }catch(e){
+    console.error(e);
+    renderGalleryLoadError(() => loadGallery(limit, type, search));
+  }finally{
+    galleryRequestInFlight = false;
+    setLoading(false);
+  }
+}
+
+async function loadInitialCatalog(limit=12, type=null, search=null){
+  if(galleryRequestInFlight) return;
+  galleryRequestInFlight = true;
+  hideSelectedPreview();
+  setLoading(true);
+  try{
+    const q = new URLSearchParams();
+    q.set('limit', String(limit));
+    if(type) q.set('type', type);
+    if(search) q.set('search', search);
+    const [typesResult, itemsResult] = await Promise.allSettled([
+      fetchJsonArray('/api/types'),
+      fetchJsonArray('/api/records?'+q.toString())
+    ]);
+    if(typesResult.status === 'rejected') throw typesResult.reason;
+    if(itemsResult.status === 'rejected') throw itemsResult.reason;
+    renderTypes(typesResult.value);
+    await renderCards(itemsResult.value);
+  }catch(e){
+    console.error(e);
+    renderGalleryLoadError(() => loadInitialCatalog(limit, type, search));
+  }finally{
+    galleryRequestInFlight = false;
+    setLoading(false);
+  }
+}
+
+async function loadSimilarRecords(id, limit=12, type=null){
+  if(galleryRequestInFlight) return;
+  galleryRequestInFlight = true;
+  setLoading(true);
+  try{
+    const q = new URLSearchParams({ limit: String(limit) });
+    if(type) q.set('type', type);
+    const items = await fetchJsonArray(`/api/records/${encodeURIComponent(id)}/similar?${q.toString()}`);
+    await renderCards(items);
+  }catch(e){
+    console.error(e);
+    renderGalleryLoadError(() => loadSimilarRecords(id, limit, type));
+  }finally{
+    galleryRequestInFlight = false;
+    setLoading(false);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', async ()=>{
+  if (window.renderSidebar) {
+    window.renderSidebar({ showSearch: true, showFilter: true, showExportHistory: false, activePage: 'home' });
+  }
+
+  // Comprueba la sesión antes de mostrar controles y datos administrativos.
+  try{
+    const meRes = await fetch('/api/me');
+    if(meRes.ok){
+      const me = await meRes.json();
+      const messagesBtn = document.querySelector('.messages-btn.admin-only');
+      const messagesPanel = document.querySelector('.messages-panel.admin-only');
+      if(me && me.is_admin){
+        adminSessionActive = true;
+        document.body.classList.add('is-admin');
+        if(window.renderSidebar){
+          window.renderSidebar({ showSearch: true, showFilter: true, showExportHistory: true, activePage: 'home' });
+        }
+        const userNameEl = document.querySelector('.user-card__info strong');
+        const userEmailEl = document.querySelector('.user-card__info span');
+        const sidebarFooter = document.querySelector('.sidebar__footer.admin-only');
+        if(userNameEl) userNameEl.textContent = me.name || 'Administrador';
+        if(userEmailEl) userEmailEl.textContent = me.email || 'admin@artsim.io';
+        if(sidebarFooter) sidebarFooter.style.display = '';
+        if(messagesBtn) messagesBtn.style.display = '';
+        if(messagesPanel) messagesPanel.style.display = '';
+        await loadExportHistory();
+      } else {
+        adminSessionActive = false;
+        document.body.classList.remove('is-admin');
+        if(messagesBtn) messagesBtn.style.display = 'none';
+        if(messagesPanel) messagesPanel.style.display = 'none';
+      }
+    }
+  }catch(e){
+    adminSessionActive = false;
+    console.warn('No se pudo comprobar /api/me', e);
+    const sidebarFooter = document.querySelector('.sidebar__footer.admin-only');
+    const messagesBtn = document.querySelector('.messages-btn.admin-only');
+    const messagesPanel = document.querySelector('.messages-panel.admin-only');
+    if(sidebarFooter) sidebarFooter.style.display = 'none';
+    if(messagesBtn) messagesBtn.style.display = 'none';
+    if(messagesPanel) messagesPanel.style.display = 'none';
+  }
+
+  const logoutButton = document.querySelector('.logout');
+  if(logoutButton){
+    logoutButton.addEventListener('click', async () => {
+      try{
+        await fetch('/api/logout', { method: 'POST' });
+      }catch(_){ }
+      window.location.reload();
+    });
+  }
+
+  const downloadReportBtn = document.getElementById('downloadReportBtn');
+  if(downloadReportBtn){
+    downloadReportBtn.addEventListener('click', downloadSimilarityReport);
+  }
+
+  const reportHistory = document.getElementById('reportHistory');
+  const reportHistoryList = document.getElementById('reportHistoryList');
+  if(reportHistory){
+    reportHistory.addEventListener('toggle', () => {
+      if(reportHistory.open) loadExportHistory();
+    });
+  }
+  if(reportHistoryList){
+    reportHistoryList.addEventListener('click', event => {
+      const button = event.target.closest('[data-export-id]');
+      if(button) downloadExportedReport(button.dataset.exportId, button);
+    });
+  }
+
+  let currentType = null;
+  let currentSearch = '';
+
+  // Aplica el filtro tanto al catálogo inicial como a una búsqueda de similares.
+  document.getElementById('dropdownContent').addEventListener('click', async (e)=>{
+    if(e.target && e.target.matches('.dropdown__item')){
+      e.preventDefault();
+      const selectedText = e.target.textContent;
+      currentType = e.target.dataset.type || null;
+      document.getElementById('dropdownSelected').textContent = selectedText;
+      if(selectedReportRecordId !== null){
+        await loadSimilarRecords(selectedReportRecordId, 12, currentType);
+      }else{
+        await loadGallery(12, currentType, currentSearch || null);
+      }
+    }
+  });
+
+  const searchInput = document.getElementById('searchInput');
+  let searchTimer;
+  if(searchInput){
+    searchInput.addEventListener('input', ()=>{
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(async ()=>{
+        currentSearch = searchInput.value.trim();
+        await loadGallery(12, currentType, currentSearch || null);
+      }, 320);
+    });
+  }
+
+  // La carga inicial trata tipos y registros como un único catálogo de Qdrant.
+  await loadInitialCatalog();
+
+  // Sincroniza la apertura de la bandeja con la consulta de mensajes.
+  const messagesToggle = document.getElementById('messagesToggle');
+  const messageList = document.getElementById('messageList');
+  const messagesEmpty = document.getElementById('messagesEmpty');
+  const messagePanelStatus = document.getElementById('messagePanelStatus');
+  const messagesPanelContent = document.querySelector('.messages-panel__content');
+
+  const setMessagePanelStatus = (text) => {
+    if(!messagePanelStatus) return;
+    messagePanelStatus.textContent = text || '';
+    if(!text){
+      messagePanelStatus.style.display = 'none';
+    } else {
+      messagePanelStatus.style.display = 'block';
+    }
+    messagePanelStatus.className = 'messages-panel__status';
+  };
+
+  const parseLocalDate = (value) => {
+    if(!value) return null;
+    const match = String(value).trim().match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2}):(\d{2}))?/);
+    if(match){
+      const [, y, m, d, hh='0', mm='0', ss='0'] = match;
+      return new Date(
+        Number(y),
+        Number(m) - 1,
+        Number(d),
+        Number(hh),
+        Number(mm),
+        Number(ss)
+      );
+    }
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  };
+
+  const formatDate = (value) => {
+    if(!value) return 'Fecha desconocida';
+    const date = parseLocalDate(value);
+    if(!date) return String(value);
+    return date.toLocaleDateString('es-ES', { year:'numeric', month:'long', day:'numeric' });
+  };
+
+  const renderMessages = (items) => {
+    if(!messageList) return;
+    if(!items || !items.length){
+      messageList.innerHTML = '';
+      messagesEmpty?.classList.remove('hidden');
+      return;
+    }
+    messagesEmpty?.classList.add('hidden');
+    messageList.innerHTML = items.map(item => {
+      const reviewedClass = item.is_reviwed ? 'message-card--reviewed' : '';
+      const checked = item.is_reviwed ? 'checked' : '';
+      return `
+        <article class="message-card ${reviewedClass}" data-id="${item.id_message}">
+          <div class="message-card__header">
+            <div>
+              <strong>${escapeHtml(item.sender_name)}</strong>
+              <a href="mailto:${escapeHtml(item.sender_email)}">${escapeHtml(item.sender_email)}</a>
+            </div>
+            <div class="message-card__header-meta">
+              <span class="message-card__date">${formatDate(item.created_at)}</span>
+              <button class="icon-btn message-card__delete delete-message-btn" type="button" data-id="${item.id_message}" aria-label="Eliminar mensaje">🗑</button>
+            </div>
+          </div>
+          <p class="message-card__body">${escapeHtml(item.message_body)}</p>
+          <div class="message-card__actions">
+            <label class="checkbox-control">
+              <input type="checkbox" class="review-checkbox" ${checked} />
+              <span>Revisado</span>
+            </label>
+          </div>
+        </article>`;
+    }).join('');
+  };
+
+  const loadMessages = async () => {
+    setMessagePanelStatus('Cargando mensajes...');
+    try{
+      const res = await fetch('/api/messages');
+      if(!res.ok) throw new Error('No se pudo cargar la bandeja');
+      const items = await res.json();
+      renderMessages(items);
+      if(messagesPanelContent){
+        messagesPanelContent.scrollTop = 0;
+      }
+      if(!items || !items.length){
+        setMessagePanelStatus('No hay mensajes nuevos en el buzón.');
+      } else {
+        // Omite el contador de mensajes para reducir el ruido visual.
+        setMessagePanelStatus('');
+      }
+    }catch(err){
+      console.error(err);
+      renderMessages([]);
+      setMessagePanelStatus('Error al cargar los mensajes.');
+    }
+  };
+
+  const updateMessageReview = async (messageId, reviewed) => {
+    try{
+      const res = await fetch(`/api/messages/${messageId}/reviewed`, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ reviewed })
+      });
+      if(!res.ok) throw new Error('No se pudo actualizar el estado');
+      return true;
+    }catch(err){
+      console.error(err);
+      setMessagePanelStatus('No se pudo marcar el mensaje como revisado.');
+      return false;
+    }
+  };
+
+  const deleteMessage = async (messageId) => {
+    try{
+      const res = await fetch(`/api/messages/${messageId}`, { method: 'DELETE' });
+      if(!res.ok) throw new Error('No se pudo eliminar el mensaje');
+      return true;
+    }catch(err){
+      console.error(err);
+      setMessagePanelStatus('No se pudo eliminar el mensaje.');
+      return false;
+    }
+  };
+
+  const syncMessagesState = () => {
+    if(messagesToggle.checked) {
+      loadMessages();
+    }
+  };
+
+  if(messagesToggle){
+    messagesToggle.addEventListener('change', syncMessagesState);
+    syncMessagesState();
+  }
+
+  document.querySelector('.messages-panel').addEventListener('click', async (e) => {
+    const deleteButton = e.target.closest('.delete-message-btn');
+    if(deleteButton){
+      const messageId = deleteButton.dataset.id;
+      if(messageId && await deleteMessage(messageId)){
+        await loadMessages();
+      }
+      return;
+    }
+  });
+
+  document.querySelector('.messages-panel').addEventListener('change', async (e) => {
+    const checkbox = e.target.closest('.review-checkbox');
+    if(checkbox){
+      const card = checkbox.closest('.message-card');
+      if(!card) return;
+      const messageId = card.dataset.id;
+      const reviewed = checkbox.checked;
+      if(await updateMessageReview(messageId, reviewed)){
+        card.classList.toggle('message-card--reviewed', reviewed);
+        // Omite confirmaciones al marcar o desmarcar para reducir el ruido visual.
+        setMessagePanelStatus('');
+      } else {
+        checkbox.checked = !reviewed;
+      }
+    }
+  });
+
+  // Delega los clics de tarjetas y reintentos para admitir contenido regenerado.
+  document.querySelector('.gallery').addEventListener('click', async (e)=>{
+    const retryButton = e.target.closest('[data-gallery-retry]');
+    if(retryButton){
+      if(galleryRequestInFlight || !pendingGalleryRetry) return;
+      retryButton.disabled = true;
+      await pendingGalleryRetry();
+      return;
+    }
+    if(e.target.matches('.similar-btn')){
+      if(galleryRequestInFlight) return;
+      const card = e.target.closest('.art-card');
+      const id = e.target.getAttribute('data-id');
+      if(card){
+        const image = card.querySelector('.art-card__thumb img');
+        const title = card.querySelector('.art-card__title h2');
+        const tag = card.querySelector('.tag');
+        const selectedItem = {
+          id,
+          base64: image?.src || '',
+          title: title?.textContent || '',
+          type: tag?.textContent || ''
+        };
+        showSelectedPreview(selectedItem);
+      }
+      await loadSimilarRecords(id, 12, currentType);
+    }
+  });
+});
+</script>
+</html>

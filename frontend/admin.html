@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ArtSim | Acceso administrativo</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body class="login-page">
+  <!-- Encabezado independiente para volver al catálogo sin iniciar sesión. -->
+  <header class="topbar">
+    <div class="topbar__left">
+      <div class="page-title" aria-hidden="true">
+        <h1>Acceso administrativo</h1>
+        <p>ARTSIM · SOLO PERSONAL AUTORIZADO</p>
+      </div>
+    </div>
+    <a class="topbar__mini" href="/">← Volver al inicio</a>
+  </header>
+
+  <main class="login-hero">
+    <!-- El formulario valida localmente antes de enviar las credenciales a la API. -->
+    <section class="login-card" aria-labelledby="loginTitle">
+      <div class="login-brand">
+        <div class="mark">✧</div>
+        <h2 id="loginTitle">Acceso administrativo</h2>
+        <p>ARTSIM · SOLO PERSONAL AUTORIZADO</p>
+      </div>
+
+      <form class="form" id="loginForm" autocomplete="off">
+        <div class="field">
+          <label for="email">Correo electrónico</label>
+          <input class="control" id="email" name="email" type="email" placeholder="correo@ejemplo.com" minlength="4" maxlength="128" autocomplete="username" required />
+          <p class="field-hint">Usa un correo válido. Máximo 128 caracteres.</p>
+        </div>
+
+        <div class="field">
+          <label for="password">Contraseña</label>
+          <div class="password-wrap">
+            <input class="control" id="password" name="password" type="password" placeholder="••••••••" minlength="8" maxlength="64" autocomplete="current-password" required />
+            <button class="eye" type="button" aria-label="Mostrar contraseña">◉</button>
+          </div>
+          <p class="field-hint">Mínimo 8 caracteres y máximo 64.</p>
+        </div>
+
+        <button class="btn" type="submit">Iniciar sesión</button>
+        <div class="error-message" id="loginError" role="alert" aria-live="assertive"></div>
+      </form>
+
+      <script>
+      // Mantiene los errores dentro del formulario para que sean accesibles.
+      const loginForm = document.getElementById('loginForm');
+      const loginError = document.getElementById('loginError');
+      const emailInput = document.getElementById('email');
+      const passwordInput = document.getElementById('password');
+      const togglePassword = document.querySelector('.eye');
+
+      function showLoginError(message){
+        if(loginError){
+          loginError.textContent = message;
+          loginError.style.display = 'block';
+        } else {
+          alert(message);
+        }
+      }
+
+      if(togglePassword){
+        // Cambia únicamente la representación; la contraseña enviada no se modifica.
+        togglePassword.addEventListener('click', () => {
+          const visible = passwordInput.type === 'text';
+          passwordInput.type = visible ? 'password' : 'text';
+          togglePassword.textContent = visible ? '◉' : '◉';
+        });
+      }
+
+      loginForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        loginError.style.display = 'none';
+        loginError.textContent = '';
+        const email = emailInput.value.trim();
+        const password = passwordInput.value;
+        const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+        if(!email || !emailPattern.test(email) || email.length > 128){
+          return showLoginError('Ingresa un correo válido (máximo 128 caracteres).');
+        }
+        if(!password || password.length < 8 || password.length > 64){
+          return showLoginError('La contraseña debe tener entre 8 y 64 caracteres.');
+        }
+
+        try{
+          const res = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password })
+          });
+          if(res.ok){
+            window.location.href = '/';
+            return;
+          }
+          const err = await res.json().catch(() => ({ detail: 'Error al iniciar sesión' }));
+          showLoginError(err.detail || 'Error al iniciar sesión');
+        }catch(err){
+          console.error(err);
+          showLoginError('Error al conectar con el servidor.');
+        }
+      });
+      </script>
+
+      <p class="login-note">
+        El acceso a este panel está restringido.<br />
+        Si no eres administrador, <a class="link-accent" href="/">regresa al inicio</a>.
+      </p>
+    </section>
+  </main>
+</body>
+</html>

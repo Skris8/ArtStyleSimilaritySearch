@@ -1,0 +1,6 @@
+-r ../backend/requirements.txt
+
+pandas~=2.3.3
+transformers[torch]~=5.0.0
+torch~=2.10.0
+ipykernel~=7.1.0
